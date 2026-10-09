@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: feature-flags
+  labels:
+    app.kubernetes.io/name: feature-flags
+spec:
+  # Node drains and cluster upgrades may evict pods only while at least one
+  # other pod stays available.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: feature-flags

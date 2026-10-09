@@ -1,0 +1,19 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: feature-flags
+  labels:
+    app.kubernetes.io/name: feature-flags
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: flags.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: feature-flags
+                port:
+                  name: http

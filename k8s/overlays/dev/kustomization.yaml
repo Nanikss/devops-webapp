@@ -1,0 +1,48 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: flags-dev
+
+resources:
+  - namespace.yaml
+  - ../../base
+
+labels:
+  - pairs:
+      app.kubernetes.io/environment: dev
+
+# scripts/kind-up.sh builds and loads this tag; scripts/deploy.sh overrides it.
+images:
+  - name: ghcr.io/nanikss/devops-webapp
+    newTag: dev
+
+replicas:
+  - name: feature-flags
+    count: 1
+
+patches:
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: feature-flags
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
+        value: 2
+  - target:
+      kind: Ingress
+      name: feature-flags
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: flags-dev.example.com
+  # With a single replica, minAvailable: 1 would block every node drain, so dev
+  # runs without a PDB.
+  - patch: |-
+      $patch: delete
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: feature-flags

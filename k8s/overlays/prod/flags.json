@@ -1,0 +1,19 @@
+{
+  "flags": {
+    "claims-fast-track": {
+      "enabled": false,
+      "rolloutPercent": 0,
+      "description": "Auto-approve low-value claims without adjuster review"
+    },
+    "dark-mode": {
+      "enabled": true,
+      "rolloutPercent": 100,
+      "description": "Dark theme in the customer portal"
+    },
+    "new-quote-flow": {
+      "enabled": true,
+      "rolloutPercent": 5,
+      "description": "Redesigned quote form, gradual rollout"
+    }
+  }
+}

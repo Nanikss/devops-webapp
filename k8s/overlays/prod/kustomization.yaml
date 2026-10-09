@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: flags-prod
+
+resources:
+  - namespace.yaml
+  - ../../base
+
+labels:
+  - pairs:
+      app.kubernetes.io/environment: prod
+
+# Prod is always deployed with an immutable commit-SHA tag via scripts/deploy.sh,
+# which rewrites this placeholder in a temporary copy.
+images:
+  - name: ghcr.io/nanikss/devops-webapp
+    newTag: set-by-deploy-script
+
+replicas:
+  - name: feature-flags
+    count: 3
+
+# Prod has its own, more conservative flag defaults.
+configMapGenerator:
+  - name: feature-flags-config
+    behavior: replace
+    files:
+      - flags.json
+
+patches:
+  - path: deployment-resources.yaml
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: feature-flags
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 3
+      - op: replace
+        path: /spec/maxReplicas
+        value: 10

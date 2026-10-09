@@ -1,0 +1,217 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    # Explicit bash gives -eo pipefail, so a failing command in a pipe fails the step.
+    shell: bash
+
+env:
+  KUSTOMIZE_VERSION: 5.4.3
+  KUBECONFORM_VERSION: 0.6.7
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Image name and tag
+        id: meta
+        run: |
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/devops-webapp" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+          build-args: APP_VERSION=${{ steps.meta.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the container
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          # --read-only matches readOnlyRootFilesystem in the Deployment.
+          docker run -d --name smoke --read-only --tmpfs /tmp -p 3000:3000 "$IMAGE"
+          curl -fsS --retry 20 --retry-delay 1 --retry-connrefused http://localhost:3000/healthz
+          curl -fsS http://localhost:3000/readyz
+          curl -fsS http://localhost:3000/version | grep -q "\"version\":\"$TAG\""
+          curl -fsS http://localhost:3000/api/flags | grep -q new-quote-flow
+          curl -fsS http://localhost:3000/metrics | grep -q http_request_duration_seconds
+          test "$(docker inspect --format '{{.Config.User}}' smoke)" = "node"
+          docker exec smoke node src/healthcheck.js
+
+      - name: Container logs
+        if: always()
+        run: docker logs smoke || true
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          docker tag "$IMAGE:$TAG" "$IMAGE:latest"
+          docker push "$IMAGE:$TAG"
+          docker push "$IMAGE:latest"
+
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kustomize and kubeconform
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin" kustomize
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin" kubeconform
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Render and validate overlays
+        run: |
+          mkdir -p rendered
+          for overlay in dev prod; do
+            echo "::group::$overlay"
+            kustomize build "k8s/overlays/$overlay" > "rendered/$overlay.yaml"
+            kubeconform -strict -summary -ignore-missing-schemas "rendered/$overlay.yaml"
+            echo "::endgroup::"
+          done
+
+      - name: Check overlay differences
+        run: |
+          # Cheap guards on the things each overlay is supposed to change.
+          grep -q "namespace: flags-dev" rendered/dev.yaml
+          grep -q "namespace: flags-prod" rendered/prod.yaml
+          grep -q "image: ghcr.io/nanikss/devops-webapp:dev" rendered/dev.yaml
+          if grep -q "kind: PodDisruptionBudget" rendered/dev.yaml; then echo "dev should not have a PDB"; exit 1; fi
+          grep -q "kind: PodDisruptionBudget" rendered/prod.yaml
+          grep -Eq "name: feature-flags-config-[a-z0-9]+" rendered/prod.yaml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rendered-manifests
+          path: rendered/
+
+  # End-to-end on a throwaway kind cluster: deploy with scripts/deploy.sh,
+  # smoke test through the Service, upgrade to a second version, then roll back.
+  kind:
+    needs: [test, manifests]
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/nanikss/devops-webapp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kustomize
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin" kustomize
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: flags
+
+      - name: Build two versions and load them into kind
+        run: |
+          docker build --build-arg APP_VERSION=e2e-1 -t "$IMAGE:e2e-1" .
+          docker build --build-arg APP_VERSION=e2e-2 -t "$IMAGE:e2e-2" .
+          kind load docker-image "$IMAGE:e2e-1" "$IMAGE:e2e-2" --name flags
+
+      - name: Deploy, upgrade, roll back
+        run: |
+          # Port-forward to the Service and run one request. A fresh port-forward
+          # per call, because pods are replaced between checks.
+          call() {
+            kubectl -n flags-dev port-forward svc/feature-flags 18080:80 >/tmp/port-forward.log 2>&1 &
+            local pf=$!
+            local out=""
+            for _ in $(seq 1 20); do
+              if out="$(curl -fsS "http://localhost:18080$1" 2>/dev/null)"; then break; fi
+              out=""
+              sleep 0.5
+            done
+            kill "$pf" 2>/dev/null || true
+            wait "$pf" 2>/dev/null || true
+            printf '%s' "$out"
+          }
+          # Old pods can still be terminating right after a rollout, so retry.
+          expect_version() {
+            for attempt in $(seq 1 10); do
+              got="$(call /version | jq -r .version 2>/dev/null || true)"
+              if [ "$got" = "$1" ]; then echo "serving version $got"; return 0; fi
+              echo "attempt $attempt: got '$got', want '$1'"
+              sleep 3
+            done
+            return 1
+          }
+
+          scripts/deploy.sh dev e2e-1
+          expect_version e2e-1
+          call /readyz | jq -e '.status == "ready"'
+          call /api/flags | jq -e '.flags | length == 3'
+          call '/api/flags/dark-mode/evaluate?userId=u-1' | jq -e '.enabled == true'
+          call /metrics | grep -q 'http_request_duration_seconds_bucket'
+
+          # Pod hardening actually applied by the API server
+          kubectl -n flags-dev get pods -l app.kubernetes.io/name=feature-flags \
+            -o jsonpath='{.items[0].spec.containers[0].securityContext.readOnlyRootFilesystem}' | grep -q true
+
+          scripts/deploy.sh dev e2e-2
+          expect_version e2e-2
+
+          scripts/deploy.sh dev --rollback
+          expect_version e2e-1
+
+      - name: Cluster state on failure
+        if: failure()
+        run: |
+          kubectl get all -n flags-dev -o wide || true
+          kubectl describe pods -n flags-dev || true
+          kubectl logs -n flags-dev -l app.kubernetes.io/name=feature-flags --tail=100 --prefix || true
+          kubectl get events -n flags-dev --sort-by=.lastTimestamp || true

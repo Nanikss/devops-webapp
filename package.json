@@ -1,15 +1,27 @@
 {
-  "name": "myapp",
-  "version": "1.0.0",
-  "main": "index.js",
+  "name": "devops-webapp",
+  "version": "2.0.0",
+  "description": "Feature flag service deployed to Kubernetes with Kustomize",
+  "private": true,
+  "main": "src/server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node src/server.js",
+    "test": "jest"
   },
-  "keywords": [],
-  "author": "",
+  "engines": {
+    "node": ">=16"
+  },
+  "author": "Kumar Nenavath",
   "license": "ISC",
-  "description": "",
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^4.21.2",
+    "prom-client": "^15.1.3"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^6.3.4"
+  },
+  "jest": {
+    "testEnvironment": "node"
   }
 }
