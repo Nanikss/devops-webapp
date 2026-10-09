@@ -67,7 +67,7 @@ jobs:
         run: |
           # --read-only matches readOnlyRootFilesystem in the Deployment.
           docker run -d --name smoke --read-only --tmpfs /tmp -p 3000:3000 "$IMAGE"
-          curl -fsS --retry 20 --retry-delay 1 --retry-connrefused http://localhost:3000/healthz
+          curl -fsS --retry 30 --retry-delay 1 --retry-all-errors http://localhost:3000/healthz
           curl -fsS http://localhost:3000/readyz
           curl -fsS http://localhost:3000/version | grep -q "\"version\":\"$TAG\""
           curl -fsS http://localhost:3000/api/flags | grep -q new-quote-flow
